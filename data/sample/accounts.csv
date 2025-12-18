@@ -1,0 +1,11 @@
+account_id,customer_name,order_limit,created_date,status
+ACC001,Acme Corporation,10,2023-01-15,ACTIVE
+ACC002,GlobalTech Industries,15,2023-02-20,ACTIVE
+ACC003,Summit Solutions,8,2023-03-10,ACTIVE
+ACC004,Pinnacle Partners,12,2023-04-05,ACTIVE
+ACC005,Horizon Enterprises,20,2023-05-18,ACTIVE
+ACC006,Stellar Systems,6,2023-06-22,ACTIVE
+ACC007,Velocity Ventures,10,2023-07-30,ACTIVE
+ACC008,Nexus Networks,14,2023-08-14,ACTIVE
+ACC009,Quantum Dynamics,5,2023-09-25,ACTIVE
+ACC010,Atlas Analytics,18,2023-10-08,ACTIVE

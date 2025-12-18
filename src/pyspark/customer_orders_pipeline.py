@@ -35,23 +35,23 @@ class CustomerOrdersPipeline:
     
     def load_accounts(self, path: str) -> DataFrame:
         """
-        Load account data from JSON file.
+        Load account data from CSV file.
         
         BUSINESS_RULE: ACCOUNT_DATA_LOADING
         Account data is loaded with schema validation. Accounts define customer
         information and their order_limit for monthly order cap enforcement.
         
         Args:
-            path: Path to accounts JSON file
+            path: Path to accounts CSV file
             
         Returns:
             DataFrame containing validated account data
         """
-        return self.spark.read.schema(AccountSchema.schema).json(path)
+        return self.spark.read.schema(AccountSchema.schema).option("header", True).csv(path)
     
     def load_orders(self, path: str) -> DataFrame:
         """
-        Load order data from JSON file.
+        Load order data from CSV file.
         
         BUSINESS_RULE: ORDER_DATA_LOADING
         Order data is loaded with schema validation. Only orders with status
@@ -59,31 +59,31 @@ class CustomerOrdersPipeline:
         Orders with status 'CANCELLED' are excluded from aggregations.
         
         Args:
-            path: Path to orders JSON file
+            path: Path to orders CSV file
             
         Returns:
             DataFrame containing validated order data
         """
-        orders_df = self.spark.read.schema(OrderSchema.schema).json(path)
+        orders_df = self.spark.read.schema(OrderSchema.schema).option("header", True).csv(path)
         return orders_df.filter(
             F.col("status").isin(["COMPLETED", "PENDING"])
         )
     
     def load_transactions(self, path: str) -> DataFrame:
         """
-        Load transaction data from JSON file.
+        Load transaction data from CSV file.
         
         BUSINESS_RULE: TRANSACTION_DATA_LOADING
         Transaction data links payments to orders. Only transactions with
         status 'SUCCESS' are included in calculations.
         
         Args:
-            path: Path to transactions JSON file
+            path: Path to transactions CSV file
             
         Returns:
             DataFrame containing validated transaction data
         """
-        transactions_df = self.spark.read.schema(TransactionSchema.schema).json(path)
+        transactions_df = self.spark.read.schema(TransactionSchema.schema).option("header", True).csv(path)
         return transactions_df.filter(F.col("status") == "SUCCESS")
     
     def join_orders_with_transactions(
@@ -234,9 +234,9 @@ if __name__ == "__main__":
     pipeline = CustomerOrdersPipeline()
     
     results = pipeline.run_rag_analysis(
-        accounts_path="data/sample/accounts.json",
-        orders_path="data/sample/orders.json",
-        transactions_path="data/sample/transactions.json"
+        accounts_path="data/sample/accounts.csv",
+        orders_path="data/sample/orders.csv",
+        transactions_path="data/sample/transactions.csv"
     )
     
     results.show()
