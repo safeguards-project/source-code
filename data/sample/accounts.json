@@ -1,0 +1,10 @@
+{"account_id": "ACC001", "customer_name": "Acme Corporation", "order_limit": 10, "created_date": "2023-01-15", "status": "ACTIVE"}
+{"account_id": "ACC002", "customer_name": "GlobalTech Industries", "order_limit": 15, "created_date": "2023-02-20", "status": "ACTIVE"}
+{"account_id": "ACC003", "customer_name": "Summit Solutions", "order_limit": 8, "created_date": "2023-03-10", "status": "ACTIVE"}
+{"account_id": "ACC004", "customer_name": "Pinnacle Partners", "order_limit": 12, "created_date": "2023-04-05", "status": "ACTIVE"}
+{"account_id": "ACC005", "customer_name": "Horizon Enterprises", "order_limit": 20, "created_date": "2023-05-18", "status": "ACTIVE"}
+{"account_id": "ACC006", "customer_name": "Stellar Systems", "order_limit": 6, "created_date": "2023-06-22", "status": "ACTIVE"}
+{"account_id": "ACC007", "customer_name": "Velocity Ventures", "order_limit": 10, "created_date": "2023-07-30", "status": "ACTIVE"}
+{"account_id": "ACC008", "customer_name": "Nexus Networks", "order_limit": 14, "created_date": "2023-08-14", "status": "ACTIVE"}
+{"account_id": "ACC009", "customer_name": "Quantum Dynamics", "order_limit": 5, "created_date": "2023-09-25", "status": "ACTIVE"}
+{"account_id": "ACC010", "customer_name": "Atlas Analytics", "order_limit": 18, "created_date": "2023-10-08", "status": "ACTIVE"}

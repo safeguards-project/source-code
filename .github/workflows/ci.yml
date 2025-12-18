@@ -1,0 +1,51 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  pyspark-validation:
+    name: PySpark Business Logic Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run PySpark Checks
+        uses: isuru-f/ci-rules/actions/pyspark-check@main
+        with:
+          source-path: src/pyspark
+          docs-path: ../business-logic-docs
+
+  sql-validation:
+    name: SQL Business Logic Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run SQL Checks
+        uses: isuru-f/ci-rules/actions/sql-check@main
+        with:
+          source-path: src/sql
+          docs-path: ../business-logic-docs
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+      
+      - name: Run tests
+        run: pytest tests/ -v --cov=src/pyspark
