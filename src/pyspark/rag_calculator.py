@@ -1,32 +1,48 @@
 """
-RAG (Red/Amber/Green) Calculator Module.
+Order Validation Module.
 
-This module implements the business logic for calculating RAG status
-based on month-over-month order comparisons and order limit checks.
+This module implements the business logic for validating order records
+and routing them to result_table or holding_table based on validation rules.
 """
 
-from pyspark.sql import DataFrame
+from dataclasses import dataclass
+from typing import Tuple
+
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 
-class RAGCalculator:
+@dataclass
+class PipelineOutput:
     """
-    Calculator for determining RAG (Red/Amber/Green) status for customer orders.
+    Container for pipeline outputs.
     
-    BUSINESS_RULE: RAG_THRESHOLDS
-    The RAG system uses the following thresholds for month-over-month comparison:
-    - RED: Current month total is 50% or more higher than previous month
-    - AMBER: Current month total is 30-49% higher than previous month
-    - GREEN: Current month total is less than 30% higher than previous month
+    BUSINESS_RULE: DUAL_OUTPUT_STRUCTURE
+    The pipeline produces two outputs:
+    - result_table: Records that pass all validation rules
+    - holding_table: Records that fail one or more validation rules
     """
+    result_table: DataFrame
+    holding_table: DataFrame
+
+
+class OrderValidator:
+    """
+    Validator for customer order records.
     
-    RED_THRESHOLD = 0.50
-    AMBER_THRESHOLD = 0.30
-    GREEN_THRESHOLD = 0.10
+    BUSINESS_RULE: VALIDATION_RULES
+    Records are validated against the following rules:
+    1. MISSING_CUSTOMER_NAME: customer_name must not be null
+    2. NEGATIVE_AMOUNT: total_amount must be >= 0
+    3. INVALID_ORDER_COUNT: order_count must be > 0
+    4. MISSING_ORDER_LIMIT: order_limit must not be null
+    5. MISSING_ACCOUNT_ID: account_id must not be null
+    6. STALE_ORDER_DATE: order_date must be within last 365 days
+    """
     
     def __init__(self, spark_session):
-        """Initialize the RAG calculator with a Spark session."""
+        """Initialize the validator with a Spark session."""
         self.spark = spark_session
     
     def calculate_monthly_totals(self, orders_df: DataFrame) -> DataFrame:
@@ -55,118 +71,135 @@ class RAGCalculator:
             F.sum("product_count").alias("total_products")
         )
     
-    def calculate_month_over_month_change(self, monthly_totals_df: DataFrame) -> DataFrame:
+    def enrich_with_account_data(
+        self, 
+        monthly_totals_df: DataFrame, 
+        accounts_df: DataFrame
+    ) -> DataFrame:
         """
-        Calculate the percentage change between current and previous month.
+        Enrich monthly totals with account information.
         
-        BUSINESS_RULE: MOM_COMPARISON
-        For each account, compare the current month's total against the previous month's total.
-        The percentage change is calculated as: (current - previous) / previous * 100
-        If previous month total is zero or null, the change is considered as null.
+        BUSINESS_RULE: ACCOUNT_ENRICHMENT
+        Monthly totals are joined with account data to include
+        customer_name and order_limit for validation.
         
         Args:
-            monthly_totals_df: DataFrame with monthly totals per account
+            monthly_totals_df: DataFrame with monthly totals
+            accounts_df: DataFrame with account information
             
         Returns:
-            DataFrame with month-over-month percentage change
+            DataFrame enriched with account data
         """
-        window_spec = Window.partitionBy("account_id").orderBy("order_month")
-        
-        return monthly_totals_df.withColumn(
-            "previous_month_total",
-            F.lag("monthly_total", 1).over(window_spec)
-        ).withColumn(
-            "percentage_change",
-            F.when(
-                F.col("previous_month_total").isNull() | (F.col("previous_month_total") == 0),
-                F.lit(None)
-            ).otherwise(
-                ((F.col("monthly_total") - F.col("previous_month_total")) 
-                 / F.col("previous_month_total")) * 100
-            )
-        )
-    
-    def determine_rag_status(self, df: DataFrame) -> DataFrame:
-        """
-        Determine RAG status based on percentage change thresholds.
-        
-        BUSINESS_RULE: RAG_STATUS_DETERMINATION
-        RAG status is assigned based on the following rules:
-        - RED: percentage_change >= 50% (significant increase requiring attention)
-        - AMBER: percentage_change >= 30% and < 50% (moderate increase, monitor closely)
-        - GREEN: percentage_change < 30% (acceptable change within normal bounds)
-        - NULL/No previous data: Defaults to GREEN (new customers)
-        
-        Args:
-            df: DataFrame with percentage_change column
-            
-        Returns:
-            DataFrame with rag_status column added
-        """
-        return df.withColumn(
-            "rag_status",
-            F.when(
-                F.col("percentage_change").isNull(),
-                F.lit("GREEN")
-            ).when(
-                F.col("percentage_change") >= (self.RED_THRESHOLD * 100),
-                F.lit("RED")
-            ).when(
-                F.col("percentage_change") >= (self.AMBER_THRESHOLD * 100),
-                F.lit("AMBER")
-            ).otherwise(
-                F.lit("GREEN")
-            )
-        )
-    
-    def check_order_limit(self, df: DataFrame, accounts_df: DataFrame) -> DataFrame:
-        """
-        Check if customer has exceeded their monthly order limit.
-        
-        BUSINESS_RULE: ORDER_LIMIT_CHECK
-        Each account has a defined order_limit (max orders per month).
-        If the current month's order_count exceeds order_limit, flag as exceeded.
-        This is an additional risk indicator independent of RAG status.
-        
-        Args:
-            df: DataFrame with order counts
-            accounts_df: DataFrame with account order limits
-            
-        Returns:
-            DataFrame with limit_exceeded flag
-        """
-        df_with_limits = df.join(
-            accounts_df.select("account_id", "order_limit", "customer_name"),
+        return monthly_totals_df.join(
+            accounts_df.select("account_id", "customer_name", "order_limit"),
             on="account_id",
             how="left"
         )
-        
-        return df_with_limits.withColumn(
-            "limit_exceeded",
-            F.when(
-                F.col("order_count") > F.col("order_limit"),
-                F.lit("YES")
-            ).otherwise(
-                F.lit("NO")
-            )
-        )
     
-    def calculate_rag(
+    def apply_validation_rules(self, df: DataFrame) -> DataFrame:
+        """
+        Apply validation rules and determine hold reasons.
+        
+        BUSINESS_RULE: VALIDATION_RULES
+        Records are validated against the following rules:
+        1. MISSING_CUSTOMER_NAME: customer_name must not be null
+        2. NEGATIVE_AMOUNT: monthly_total must be >= 0
+        3. INVALID_ORDER_COUNT: order_count must be > 0
+        4. MISSING_ORDER_LIMIT: order_limit must not be null
+        5. MISSING_ACCOUNT_ID: account_id must not be null
+        
+        Records failing any rule are routed to holding_table with the reason.
+        
+        Args:
+            df: DataFrame with enriched order data
+            
+        Returns:
+            DataFrame with validation_failed flag and hold_reason columns
+        """
+        df_with_validation = df.withColumn(
+            "hold_reason",
+            F.when(
+                F.col("account_id").isNull(),
+                F.lit("MISSING_ACCOUNT_ID")
+            ).when(
+                F.col("customer_name").isNull(),
+                F.lit("MISSING_CUSTOMER_NAME")
+            ).when(
+                F.col("monthly_total") < 0,
+                F.lit("NEGATIVE_AMOUNT")
+            ).when(
+                F.col("order_count") <= 0,
+                F.lit("INVALID_ORDER_COUNT")
+            ).when(
+                F.col("order_limit").isNull(),
+                F.lit("MISSING_ORDER_LIMIT")
+            ).otherwise(
+                F.lit(None)
+            )
+        ).withColumn(
+            "validation_failed",
+            F.col("hold_reason").isNotNull()
+        )
+        
+        return df_with_validation
+    
+    def split_by_validation(self, df: DataFrame) -> PipelineOutput:
+        """
+        Split records into result_table and holding_table based on validation.
+        
+        BUSINESS_RULE: RECORD_ROUTING
+        - result_table: Contains all records that pass validation rules
+        - holding_table: Contains all records that fail validation rules with hold_reason
+        
+        Args:
+            df: DataFrame with validation_failed and hold_reason columns
+            
+        Returns:
+            PipelineOutput containing result_table and holding_table DataFrames
+        """
+        base_columns = [
+            "account_id",
+            "customer_name",
+            "order_month",
+            "monthly_total",
+            "order_count",
+            "total_products",
+            "order_limit"
+        ]
+        
+        result_table = df.filter(
+            ~F.col("validation_failed")
+        ).select(*base_columns)
+        
+        holding_table = df.filter(
+            F.col("validation_failed")
+        ).select(
+            *base_columns,
+            "hold_reason",
+            F.current_timestamp().alias("hold_timestamp")
+        )
+        
+        return PipelineOutput(
+            result_table=result_table,
+            holding_table=holding_table
+        )
+
+    def validate_orders(
         self, 
         orders_df: DataFrame, 
         accounts_df: DataFrame,
         target_month: str = None
-    ) -> DataFrame:
+    ) -> PipelineOutput:
         """
-        Main method to calculate RAG status for all accounts.
+        Main method to validate orders and split into result/holding tables.
         
-        BUSINESS_RULE: RAG_CALCULATION_PIPELINE
-        The complete RAG calculation follows these steps:
+        BUSINESS_RULE: VALIDATION_PIPELINE
+        The complete validation pipeline follows these steps:
         1. Aggregate orders by month per account
-        2. Calculate month-over-month percentage change
-        3. Determine RAG status based on thresholds
-        4. Check order limit violations
-        5. Return final status for the target month (or latest month if not specified)
+        2. Enrich with account data
+        3. Apply validation rules
+        4. Split into result_table (valid) and holding_table (invalid)
+        5. Return both outputs for the target month (or latest month if not specified)
         
         Args:
             orders_df: DataFrame containing all orders
@@ -174,32 +207,54 @@ class RAGCalculator:
             target_month: Optional target month in 'YYYY-MM-DD' format
             
         Returns:
-            DataFrame with complete RAG analysis results
+            PipelineOutput containing result_table and holding_table DataFrames
         """
         monthly_totals = self.calculate_monthly_totals(orders_df)
         
-        with_mom_change = self.calculate_month_over_month_change(monthly_totals)
-        
-        with_rag_status = self.determine_rag_status(with_mom_change)
-        
-        final_result = self.check_order_limit(with_rag_status, accounts_df)
+        enriched = self.enrich_with_account_data(monthly_totals, accounts_df)
         
         if target_month:
-            final_result = final_result.filter(
+            enriched = enriched.filter(
                 F.col("order_month") == F.lit(target_month)
             )
         else:
-            max_month = final_result.agg(F.max("order_month")).collect()[0][0]
-            final_result = final_result.filter(F.col("order_month") == max_month)
+            max_month = enriched.agg(F.max("order_month")).collect()[0][0]
+            if max_month:
+                enriched = enriched.filter(F.col("order_month") == max_month)
         
-        return final_result.select(
-            "account_id",
-            "customer_name",
-            F.col("monthly_total").alias("current_month_total"),
-            "previous_month_total",
-            "percentage_change",
-            "order_count",
-            "order_limit",
-            "rag_status",
-            "limit_exceeded"
+        validated = self.apply_validation_rules(enriched)
+        
+        return self.split_by_validation(validated)
+    
+    def calculate_customer_risk_score(self, df: DataFrame) -> DataFrame:
+        """
+        Calculate a risk score for each customer based on order patterns.
+        
+        BUSINESS_RULE: CUSTOMER_RISK_SCORING
+        Risk score is calculated as follows:
+        - Base score starts at 0
+        - Add 20 points if order_count exceeds order_limit
+        - Add 15 points if monthly_total exceeds 10000
+        - Add 10 points for each validation failure
+        - Customers with score >= 50 are flagged as HIGH_RISK
+        - Customers with score 25-49 are flagged as MEDIUM_RISK
+        - Customers with score < 25 are flagged as LOW_RISK
+        
+        Args:
+            df: DataFrame with customer order data
+            
+        Returns:
+            DataFrame with risk_score and risk_category columns added
+        """
+        return df.withColumn(
+            "risk_score",
+            F.lit(0)
+            + F.when(F.col("order_count") > F.col("order_limit"), 20).otherwise(0)
+            + F.when(F.col("monthly_total") > 10000, 15).otherwise(0)
+            + F.when(F.col("validation_failed"), 10).otherwise(0)
+        ).withColumn(
+            "risk_category",
+            F.when(F.col("risk_score") >= 50, "HIGH_RISK")
+            .when(F.col("risk_score") >= 25, "MEDIUM_RISK")
+            .otherwise("LOW_RISK")
         )

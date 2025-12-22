@@ -86,3 +86,27 @@ class RAGResultSchema:
         StructField("rag_status", StringType(), False),
         StructField("limit_exceeded", StringType(), False),
     ])
+
+
+class HoldingRecordSchema:
+    """
+    Schema definition for records held due to validation failures.
+    
+    BUSINESS_RULE: HOLDING_TABLE_STRUCTURE
+    Records that fail validation rules are routed to the holding table
+    with a reason code indicating which rule was violated.
+    """
+    
+    schema = StructType([
+        StructField("account_id", StringType(), False),
+        StructField("customer_name", StringType(), True),
+        StructField("current_month_total", DoubleType(), True),
+        StructField("previous_month_total", DoubleType(), True),
+        StructField("percentage_change", DoubleType(), True),
+        StructField("order_count", IntegerType(), True),
+        StructField("order_limit", IntegerType(), True),
+        StructField("rag_status", StringType(), True),
+        StructField("limit_exceeded", StringType(), True),
+        StructField("hold_reason", StringType(), False),
+        StructField("hold_timestamp", TimestampType(), False),
+    ])

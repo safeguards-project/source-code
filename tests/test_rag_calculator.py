@@ -1,21 +1,20 @@
 """
-Unit tests for RAG Calculator module.
+Unit tests for Order Validator module.
 
-Tests the business logic for RAG status determination and order limit checks.
+Tests the business logic for validation rules and routing to result/holding tables.
 """
 
 import pytest
 from datetime import date
 from pyspark.sql import SparkSession
 from pyspark.sql import Row
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, DateType
 
 
 @pytest.fixture(scope="module")
 def spark():
     """Create a SparkSession for testing."""
     return SparkSession.builder \
-        .appName("TestRAGCalculator") \
+        .appName("TestOrderValidator") \
         .master("local[*]") \
         .getOrCreate()
 
@@ -32,151 +31,14 @@ def sample_accounts(spark):
 
 
 @pytest.fixture
-def sample_orders_same_month(spark):
-    """Create orders all in the same month for testing."""
+def sample_orders(spark):
+    """Create sample orders DataFrame."""
     data = [
         Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 1), total_amount=1000.0, product_count=5, status="COMPLETED"),
         Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 10), total_amount=1500.0, product_count=7, status="COMPLETED"),
         Row(order_id="ORD003", account_id="ACC002", order_date=date(2024, 12, 5), total_amount=800.0, product_count=3, status="COMPLETED"),
     ]
     return spark.createDataFrame(data)
-
-
-@pytest.fixture
-def sample_orders_two_months(spark):
-    """Create orders spanning two months for MoM comparison."""
-    data = [
-        Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
-        Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 11, 15), total_amount=1000.0, product_count=5, status="COMPLETED"),
-        Row(order_id="ORD003", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=3200.0, product_count=12, status="COMPLETED"),
-        Row(order_id="ORD004", account_id="ACC002", order_date=date(2024, 11, 10), total_amount=1000.0, product_count=4, status="COMPLETED"),
-        Row(order_id="ORD005", account_id="ACC002", order_date=date(2024, 12, 10), total_amount=1350.0, product_count=5, status="COMPLETED"),
-        Row(order_id="ORD006", account_id="ACC003", order_date=date(2024, 11, 20), total_amount=1000.0, product_count=4, status="COMPLETED"),
-        Row(order_id="ORD007", account_id="ACC003", order_date=date(2024, 12, 20), total_amount=1100.0, product_count=4, status="COMPLETED"),
-    ]
-    return spark.createDataFrame(data)
-
-
-class TestRAGThresholds:
-    """
-    Test RAG threshold logic.
-    
-    BUSINESS_RULE: RAG_THRESHOLDS
-    - RED: >= 50% increase
-    - AMBER: >= 30% and < 50% increase
-    - GREEN: < 30% increase
-    """
-    
-    def test_red_status_50_percent_increase(self, spark, sample_accounts):
-        """Test that 50%+ increase results in RED status."""
-        from src.pyspark.rag_calculator import RAGCalculator
-        
-        orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
-            Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1500.0, product_count=7, status="COMPLETED"),
-        ]
-        orders_df = spark.createDataFrame(orders_data)
-        
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
-        
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "RED"
-        assert result_row["percentage_change"] == 50.0
-    
-    def test_amber_status_35_percent_increase(self, spark, sample_accounts):
-        """Test that 30-49% increase results in AMBER status."""
-        from src.pyspark.rag_calculator import RAGCalculator
-        
-        orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
-            Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1350.0, product_count=6, status="COMPLETED"),
-        ]
-        orders_df = spark.createDataFrame(orders_data)
-        
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
-        
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "AMBER"
-        assert result_row["percentage_change"] == 35.0
-    
-    def test_green_status_20_percent_increase(self, spark, sample_accounts):
-        """Test that <30% increase results in GREEN status."""
-        from src.pyspark.rag_calculator import RAGCalculator
-        
-        orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
-            Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1200.0, product_count=5, status="COMPLETED"),
-        ]
-        orders_df = spark.createDataFrame(orders_data)
-        
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
-        
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "GREEN"
-        assert result_row["percentage_change"] == 20.0
-    
-    def test_green_status_new_customer_no_previous_month(self, spark, sample_accounts):
-        """Test that new customers with no previous month data get GREEN status."""
-        from src.pyspark.rag_calculator import RAGCalculator
-        
-        orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=5000.0, product_count=20, status="COMPLETED"),
-        ]
-        orders_df = spark.createDataFrame(orders_data)
-        
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
-        
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "GREEN"
-        assert result_row["percentage_change"] is None
-
-
-class TestOrderLimitCheck:
-    """
-    Test order limit checking logic.
-    
-    BUSINESS_RULE: ORDER_LIMIT_CHECK
-    Flag customers who exceed their monthly order limit.
-    """
-    
-    def test_order_limit_exceeded(self, spark, sample_accounts):
-        """Test that exceeding order limit is flagged."""
-        from src.pyspark.rag_calculator import RAGCalculator
-        
-        orders_data = [
-            Row(order_id=f"ORD{i:03d}", account_id="ACC002", order_date=date(2024, 12, i+1), total_amount=100.0, product_count=1, status="COMPLETED")
-            for i in range(6)
-        ]
-        orders_df = spark.createDataFrame(orders_data)
-        
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
-        
-        result_row = result.collect()[0]
-        assert result_row["limit_exceeded"] == "YES"
-        assert result_row["order_count"] == 6
-        assert result_row["order_limit"] == 5
-    
-    def test_order_limit_not_exceeded(self, spark, sample_accounts):
-        """Test that staying within order limit is not flagged."""
-        from src.pyspark.rag_calculator import RAGCalculator
-        
-        orders_data = [
-            Row(order_id=f"ORD{i:03d}", account_id="ACC002", order_date=date(2024, 12, i+1), total_amount=100.0, product_count=1, status="COMPLETED")
-            for i in range(4)
-        ]
-        orders_df = spark.createDataFrame(orders_data)
-        
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
-        
-        result_row = result.collect()[0]
-        assert result_row["limit_exceeded"] == "NO"
-        assert result_row["order_count"] == 4
 
 
 class TestMonthlyAggregation:
@@ -189,7 +51,7 @@ class TestMonthlyAggregation:
     
     def test_monthly_totals_calculation(self, spark):
         """Test that monthly totals are calculated correctly."""
-        from src.pyspark.rag_calculator import RAGCalculator
+        from src.pyspark.rag_calculator import OrderValidator
         
         orders_data = [
             Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 1), total_amount=100.0, product_count=1, status="COMPLETED"),
@@ -198,8 +60,8 @@ class TestMonthlyAggregation:
         ]
         orders_df = spark.createDataFrame(orders_data)
         
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_monthly_totals(orders_df)
+        validator = OrderValidator(spark)
+        result = validator.calculate_monthly_totals(orders_df)
         
         result_row = result.collect()[0]
         assert result_row["monthly_total"] == 600.0
@@ -207,57 +69,195 @@ class TestMonthlyAggregation:
         assert result_row["total_products"] == 6
 
 
-class TestEdgeCases:
-    """Test edge cases and boundary conditions."""
+class TestValidationRules:
+    """
+    Test validation rules logic.
     
-    def test_exactly_30_percent_is_amber(self, spark, sample_accounts):
-        """Test that exactly 30% increase results in AMBER (boundary case)."""
-        from src.pyspark.rag_calculator import RAGCalculator
+    BUSINESS_RULE: VALIDATION_RULES
+    Records are validated and routed to holding_table if they fail:
+    - MISSING_ACCOUNT_ID: account_id is null
+    - MISSING_CUSTOMER_NAME: customer_name is null
+    - NEGATIVE_AMOUNT: monthly_total < 0
+    - INVALID_ORDER_COUNT: order_count <= 0
+    - MISSING_ORDER_LIMIT: order_limit is null
+    """
+    
+    def test_valid_records_go_to_result_table(self, spark, sample_accounts, sample_orders):
+        """Test that valid records go to result_table, not holding_table."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(sample_orders, sample_accounts, "2024-12-01")
+        
+        assert output.result_table.count() > 0
+        assert output.holding_table.count() == 0
+    
+    def test_missing_customer_name_routed_to_holding(self, spark):
+        """Test that records with missing customer_name go to holding_table."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        accounts_data = [
+            Row(account_id="ACC001", customer_name=None, order_limit=10),
+        ]
+        accounts_df = spark.createDataFrame(accounts_data)
         
         orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
-            Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1300.0, product_count=6, status="COMPLETED"),
+            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
         ]
         orders_df = spark.createDataFrame(orders_data)
         
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(orders_df, accounts_df, "2024-12-01")
         
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "AMBER"
+        assert output.result_table.count() == 0
+        assert output.holding_table.count() == 1
+        holding_row = output.holding_table.collect()[0]
+        assert holding_row["hold_reason"] == "MISSING_CUSTOMER_NAME"
     
-    def test_exactly_50_percent_is_red(self, spark, sample_accounts):
-        """Test that exactly 50% increase results in RED (boundary case)."""
-        from src.pyspark.rag_calculator import RAGCalculator
+    def test_missing_order_limit_routed_to_holding(self, spark):
+        """Test that records with missing order_limit go to holding_table."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        accounts_data = [
+            Row(account_id="ACC001", customer_name="Test Corp", order_limit=None),
+        ]
+        accounts_df = spark.createDataFrame(accounts_data)
         
         orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
-            Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1500.0, product_count=7, status="COMPLETED"),
+            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
         ]
         orders_df = spark.createDataFrame(orders_data)
         
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(orders_df, accounts_df, "2024-12-01")
         
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "RED"
+        assert output.result_table.count() == 0
+        assert output.holding_table.count() == 1
+        holding_row = output.holding_table.collect()[0]
+        assert holding_row["hold_reason"] == "MISSING_ORDER_LIMIT"
     
-    def test_decrease_in_orders_is_green(self, spark, sample_accounts):
-        """Test that a decrease in orders results in GREEN status."""
-        from src.pyspark.rag_calculator import RAGCalculator
+    def test_holding_table_has_hold_timestamp(self, spark):
+        """Test that holding_table records include hold_timestamp."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        accounts_data = [
+            Row(account_id="ACC001", customer_name=None, order_limit=10),
+        ]
+        accounts_df = spark.createDataFrame(accounts_data)
         
         orders_data = [
-            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 11, 5), total_amount=2000.0, product_count=10, status="COMPLETED"),
-            Row(order_id="ORD002", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
+            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
         ]
         orders_df = spark.createDataFrame(orders_data)
         
-        calculator = RAGCalculator(spark)
-        result = calculator.calculate_rag(orders_df, sample_accounts, "2024-12-01")
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(orders_df, accounts_df, "2024-12-01")
         
-        result_row = result.collect()[0]
-        assert result_row["rag_status"] == "GREEN"
-        assert result_row["percentage_change"] == -50.0
+        holding_row = output.holding_table.collect()[0]
+        assert holding_row["hold_timestamp"] is not None
+
+
+class TestResultTableOutput:
+    """
+    Test result_table output structure.
+    
+    BUSINESS_RULE: RESULT_TABLE_OUTPUT
+    result_table should contain valid records with correct columns.
+    """
+    
+    def test_result_table_has_expected_columns(self, spark, sample_accounts, sample_orders):
+        """Test that result_table has all expected columns."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(sample_orders, sample_accounts, "2024-12-01")
+        
+        expected_columns = [
+            "account_id",
+            "customer_name",
+            "order_month",
+            "monthly_total",
+            "order_count",
+            "total_products",
+            "order_limit"
+        ]
+        
+        for col in expected_columns:
+            assert col in output.result_table.columns
+
+
+class TestHoldingTableOutput:
+    """
+    Test holding_table output structure.
+    
+    BUSINESS_RULE: HOLDING_TABLE_OUTPUT
+    holding_table should contain invalid records with hold_reason and timestamp.
+    """
+    
+    def test_holding_table_has_expected_columns(self, spark):
+        """Test that holding_table has all expected columns."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        accounts_data = [
+            Row(account_id="ACC001", customer_name=None, order_limit=10),
+        ]
+        accounts_df = spark.createDataFrame(accounts_data)
+        
+        orders_data = [
+            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
+        ]
+        orders_df = spark.createDataFrame(orders_data)
+        
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(orders_df, accounts_df, "2024-12-01")
+        
+        expected_columns = [
+            "account_id",
+            "customer_name",
+            "order_month",
+            "monthly_total",
+            "order_count",
+            "total_products",
+            "order_limit",
+            "hold_reason",
+            "hold_timestamp"
+        ]
+        
+        for col in expected_columns:
+            assert col in output.holding_table.columns
+
+
+class TestMultipleAccounts:
+    """Test handling of multiple accounts with mixed validation results."""
+    
+    def test_mixed_valid_and_invalid_records(self, spark):
+        """Test that valid and invalid records are correctly split."""
+        from src.pyspark.rag_calculator import OrderValidator
+        
+        accounts_data = [
+            Row(account_id="ACC001", customer_name="Valid Corp", order_limit=10),
+            Row(account_id="ACC002", customer_name=None, order_limit=5),
+        ]
+        accounts_df = spark.createDataFrame(accounts_data)
+        
+        orders_data = [
+            Row(order_id="ORD001", account_id="ACC001", order_date=date(2024, 12, 5), total_amount=1000.0, product_count=5, status="COMPLETED"),
+            Row(order_id="ORD002", account_id="ACC002", order_date=date(2024, 12, 5), total_amount=500.0, product_count=3, status="COMPLETED"),
+        ]
+        orders_df = spark.createDataFrame(orders_data)
+        
+        validator = OrderValidator(spark)
+        output = validator.validate_orders(orders_df, accounts_df, "2024-12-01")
+        
+        assert output.result_table.count() == 1
+        assert output.holding_table.count() == 1
+        
+        result_row = output.result_table.collect()[0]
+        assert result_row["account_id"] == "ACC001"
+        
+        holding_row = output.holding_table.collect()[0]
+        assert holding_row["account_id"] == "ACC002"
+        assert holding_row["hold_reason"] == "MISSING_CUSTOMER_NAME"
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 -- Customer Orders Pipeline - SQL Implementation
--- This SQL script implements the customer orders processing and RAG calculation logic
+-- This SQL script implements the customer orders processing and validation logic
+-- Outputs: result_table (valid records) and holding_table (invalid records)
 
 -- BUSINESS_RULE: ORDER_FILTERING
 -- Only include orders with status 'COMPLETED' or 'PENDING'
@@ -74,105 +75,103 @@ SELECT
 FROM orders_with_payments
 GROUP BY account_id, DATE_TRUNC('month', order_date);
 
--- Step 5: Calculate month-over-month changes
--- BUSINESS_RULE: MOM_COMPARISON
--- Compare current month total against previous month total
--- Calculate percentage change: (current - previous) / previous * 100
-CREATE OR REPLACE VIEW monthly_changes AS
+-- Step 5: Enrich with account data
+-- BUSINESS_RULE: ACCOUNT_ENRICHMENT
+-- Join monthly totals with account information
+CREATE OR REPLACE VIEW enriched_monthly_totals AS
 SELECT 
-    account_id,
-    order_month,
-    monthly_total AS current_month_total,
-    LAG(monthly_total, 1) OVER (
-        PARTITION BY account_id 
-        ORDER BY order_month
-    ) AS previous_month_total,
-    order_count,
-    total_products,
-    CASE 
-        WHEN LAG(monthly_total, 1) OVER (
-            PARTITION BY account_id 
-            ORDER BY order_month
-        ) IS NULL THEN NULL
-        WHEN LAG(monthly_total, 1) OVER (
-            PARTITION BY account_id 
-            ORDER BY order_month
-        ) = 0 THEN NULL
-        ELSE (
-            (monthly_total - LAG(monthly_total, 1) OVER (
-                PARTITION BY account_id 
-                ORDER BY order_month
-            )) / LAG(monthly_total, 1) OVER (
-                PARTITION BY account_id 
-                ORDER BY order_month
-            )
-        ) * 100
-    END AS percentage_change
-FROM monthly_account_totals;
-
--- Step 6: Determine RAG status
--- BUSINESS_RULE: RAG_STATUS_DETERMINATION
--- RAG thresholds:
--- - RED: percentage_change >= 50%
--- - AMBER: percentage_change >= 30% AND < 50%
--- - GREEN: percentage_change < 30% OR NULL (new customers)
-CREATE OR REPLACE VIEW rag_status_view AS
-SELECT 
-    mc.account_id,
+    mat.account_id,
     a.customer_name,
-    mc.order_month,
-    mc.current_month_total,
-    mc.previous_month_total,
-    mc.percentage_change,
-    mc.order_count,
-    a.order_limit,
-    CASE 
-        WHEN mc.percentage_change IS NULL THEN 'GREEN'
-        WHEN mc.percentage_change >= 50 THEN 'RED'
-        WHEN mc.percentage_change >= 30 THEN 'AMBER'
-        ELSE 'GREEN'
-    END AS rag_status,
-    -- BUSINESS_RULE: ORDER_LIMIT_CHECK
-    -- Flag accounts that exceed their monthly order limit
-    CASE 
-        WHEN mc.order_count > a.order_limit THEN 'YES'
-        ELSE 'NO'
-    END AS limit_exceeded
-FROM monthly_changes mc
-JOIN accounts a ON mc.account_id = a.account_id;
+    mat.order_month,
+    mat.monthly_total,
+    mat.order_count,
+    mat.total_products,
+    a.order_limit
+FROM monthly_account_totals mat
+LEFT JOIN accounts a ON mat.account_id = a.account_id
+WHERE mat.order_month = (SELECT MAX(order_month) FROM monthly_account_totals);
 
--- Step 7: Final RAG Analysis Query
--- BUSINESS_RULE: RAG_ANALYSIS_FINAL
--- Returns the complete RAG analysis for the most recent month
--- Includes all risk indicators and customer information
+-- Step 6: Apply validation rules
+-- BUSINESS_RULE: VALIDATION_RULES
+-- Records are validated against multiple rules:
+-- 1. MISSING_ACCOUNT_ID: account_id must not be null
+-- 2. MISSING_CUSTOMER_NAME: customer_name must not be null
+-- 3. NEGATIVE_AMOUNT: monthly_total must be >= 0
+-- 4. INVALID_ORDER_COUNT: order_count must be > 0
+-- 5. MISSING_ORDER_LIMIT: order_limit must not be null
+CREATE OR REPLACE VIEW validated_orders AS
+SELECT 
+    *,
+    CASE 
+        WHEN account_id IS NULL THEN 'MISSING_ACCOUNT_ID'
+        WHEN customer_name IS NULL THEN 'MISSING_CUSTOMER_NAME'
+        WHEN monthly_total < 0 THEN 'NEGATIVE_AMOUNT'
+        WHEN order_count <= 0 THEN 'INVALID_ORDER_COUNT'
+        WHEN order_limit IS NULL THEN 'MISSING_ORDER_LIMIT'
+        ELSE NULL
+    END AS hold_reason
+FROM enriched_monthly_totals;
+
+-- =============================================================================
+-- RESULT TABLE OUTPUT
+-- =============================================================================
+
+-- BUSINESS_RULE: RESULT_TABLE_OUTPUT
+-- result_table contains all records that pass validation rules
 SELECT 
     account_id,
     customer_name,
-    current_month_total,
-    previous_month_total,
-    ROUND(percentage_change, 2) AS percentage_change,
+    order_month,
+    monthly_total,
     order_count,
-    order_limit,
-    rag_status,
-    limit_exceeded
-FROM rag_status_view
-WHERE order_month = (SELECT MAX(order_month) FROM rag_status_view)
-ORDER BY 
-    CASE rag_status 
-        WHEN 'RED' THEN 1 
-        WHEN 'AMBER' THEN 2 
-        ELSE 3 
-    END,
-    percentage_change DESC NULLS LAST;
+    total_products,
+    order_limit
+FROM validated_orders
+WHERE hold_reason IS NULL
+ORDER BY account_id;
 
--- Risk Summary Query
--- BUSINESS_RULE: RISK_SUMMARY
--- Aggregate counts for monitoring and reporting
+-- =============================================================================
+-- HOLDING TABLE OUTPUT
+-- =============================================================================
+
+-- BUSINESS_RULE: HOLDING_TABLE_OUTPUT
+-- holding_table contains all records that fail validation rules
+-- Each record includes the hold_reason and hold_timestamp
 SELECT 
-    COUNT(*) AS total_accounts,
-    SUM(CASE WHEN rag_status = 'RED' THEN 1 ELSE 0 END) AS red_count,
-    SUM(CASE WHEN rag_status = 'AMBER' THEN 1 ELSE 0 END) AS amber_count,
-    SUM(CASE WHEN rag_status = 'GREEN' THEN 1 ELSE 0 END) AS green_count,
-    SUM(CASE WHEN limit_exceeded = 'YES' THEN 1 ELSE 0 END) AS limit_exceeded_count
-FROM rag_status_view
-WHERE order_month = (SELECT MAX(order_month) FROM rag_status_view);
+    account_id,
+    customer_name,
+    order_month,
+    monthly_total,
+    order_count,
+    total_products,
+    order_limit,
+    hold_reason,
+    CURRENT_TIMESTAMP AS hold_timestamp
+FROM validated_orders
+WHERE hold_reason IS NOT NULL
+ORDER BY hold_reason, account_id;
+
+-- =============================================================================
+-- SUMMARY QUERIES
+-- =============================================================================
+
+-- Result Summary Query
+-- BUSINESS_RULE: RESULT_SUMMARY
+-- Aggregate metrics for valid records
+SELECT 
+    COUNT(*) AS total_records,
+    SUM(monthly_total) AS total_amount,
+    SUM(order_count) AS total_orders
+FROM validated_orders
+WHERE hold_reason IS NULL;
+
+-- Holding Summary Query
+-- BUSINESS_RULE: HOLDING_SUMMARY
+-- Summary of records in holding table by reason
+SELECT 
+    hold_reason,
+    COUNT(*) AS record_count
+FROM validated_orders
+WHERE hold_reason IS NOT NULL
+GROUP BY hold_reason
+ORDER BY record_count DESC;

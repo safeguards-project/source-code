@@ -2,7 +2,8 @@
 Customer Orders Pipeline - Main PySpark Pipeline Module.
 
 This module orchestrates the complete customer orders processing pipeline,
-including data loading, transformation, RAG calculation, and output generation.
+including data loading, validation, and output generation to result_table
+and holding_table.
 """
 
 from pyspark.sql import SparkSession, DataFrame
@@ -10,20 +11,20 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
 from .models import AccountSchema, OrderSchema, TransactionSchema
-from .rag_calculator import RAGCalculator
+from .rag_calculator import OrderValidator, PipelineOutput
 
 
 class CustomerOrdersPipeline:
     """
-    Main pipeline for processing customer orders and calculating business metrics.
+    Main pipeline for processing customer orders and validating records.
     
     BUSINESS_RULE: PIPELINE_OVERVIEW
     This pipeline processes customer orders to:
     1. Load and validate account, order, and transaction data
     2. Join datasets to create a unified view
     3. Calculate monthly aggregations
-    4. Determine RAG (Red/Amber/Green) status for each customer
-    5. Identify customers exceeding their order limits
+    4. Apply validation rules
+    5. Output result_table (valid records) and holding_table (invalid records)
     """
     
     def __init__(self, spark: SparkSession = None):
@@ -31,7 +32,7 @@ class CustomerOrdersPipeline:
         self.spark = spark or SparkSession.builder \
             .appName("CustomerOrdersPipeline") \
             .getOrCreate()
-        self.rag_calculator = RAGCalculator(self.spark)
+        self.validator = OrderValidator(self.spark)
     
     def load_accounts(self, path: str) -> DataFrame:
         """
@@ -39,7 +40,7 @@ class CustomerOrdersPipeline:
         
         BUSINESS_RULE: ACCOUNT_DATA_LOADING
         Account data is loaded with schema validation. Accounts define customer
-        information and their order_limit for monthly order cap enforcement.
+        information and their order_limit for validation.
         
         Args:
             path: Path to accounts CSV file
@@ -55,7 +56,7 @@ class CustomerOrdersPipeline:
         
         BUSINESS_RULE: ORDER_DATA_LOADING
         Order data is loaded with schema validation. Only orders with status
-        'COMPLETED' or 'PENDING' are considered for RAG calculations.
+        'COMPLETED' or 'PENDING' are considered valid.
         Orders with status 'CANCELLED' are excluded from aggregations.
         
         Args:
@@ -116,62 +117,31 @@ class CustomerOrdersPipeline:
             how="left"
         ).fillna({"total_paid": 0.0, "transaction_count": 0})
     
-    def create_customer_order_summary(
-        self,
-        accounts_df: DataFrame,
-        orders_df: DataFrame
-    ) -> DataFrame:
-        """
-        Create a summary of orders per customer with account details.
-        
-        BUSINESS_RULE: CUSTOMER_ORDER_SUMMARY
-        Aggregates all orders per customer and joins with account information
-        to provide a complete view of customer ordering behavior.
-        
-        Args:
-            accounts_df: DataFrame containing account data
-            orders_df: DataFrame containing order data
-            
-        Returns:
-            DataFrame with customer order summary
-        """
-        order_summary = orders_df.groupBy("account_id").agg(
-            F.count("order_id").alias("total_orders"),
-            F.sum("total_amount").alias("total_spend"),
-            F.avg("total_amount").alias("avg_order_value"),
-            F.min("order_date").alias("first_order_date"),
-            F.max("order_date").alias("last_order_date")
-        )
-        
-        return accounts_df.join(
-            order_summary,
-            on="account_id",
-            how="left"
-        )
-    
-    def run_rag_analysis(
+    def run_pipeline(
         self,
         accounts_path: str,
         orders_path: str,
         transactions_path: str,
         target_month: str = None
-    ) -> DataFrame:
+    ) -> PipelineOutput:
         """
-        Execute the complete RAG analysis pipeline.
+        Execute the complete orders processing pipeline.
         
-        BUSINESS_RULE: RAG_ANALYSIS_EXECUTION
-        The complete analysis pipeline:
+        BUSINESS_RULE: PIPELINE_EXECUTION
+        The complete pipeline:
         1. Loads all data sources with validation
         2. Filters out cancelled orders and failed transactions
         3. Calculates monthly aggregations
-        4. Computes month-over-month changes
-        5. Assigns RAG status based on defined thresholds
-        6. Checks order limit violations
+        4. Applies validation rules to split records
+        5. Outputs result_table (valid) and holding_table (invalid records)
         
-        RAG Thresholds:
-        - RED: >= 50% increase from previous month
-        - AMBER: >= 30% and < 50% increase from previous month
-        - GREEN: < 30% increase from previous month
+        BUSINESS_RULE: HOLDING_TABLE_ROUTING
+        Records are routed to holding_table if they fail any validation rule:
+        - MISSING_ACCOUNT_ID: account_id is null
+        - MISSING_CUSTOMER_NAME: customer_name is null
+        - NEGATIVE_AMOUNT: monthly_total < 0
+        - INVALID_ORDER_COUNT: order_count <= 0
+        - MISSING_ORDER_LIMIT: order_limit is null
         
         Args:
             accounts_path: Path to accounts data
@@ -180,7 +150,7 @@ class CustomerOrdersPipeline:
             target_month: Optional specific month to analyze
             
         Returns:
-            DataFrame with RAG analysis results
+            PipelineOutput with result_table and holding_table DataFrames
         """
         accounts_df = self.load_accounts(accounts_path)
         orders_df = self.load_orders(orders_path)
@@ -188,58 +158,99 @@ class CustomerOrdersPipeline:
         
         enriched_orders = self.join_orders_with_transactions(orders_df, transactions_df)
         
-        rag_results = self.rag_calculator.calculate_rag(
+        pipeline_output = self.validator.validate_orders(
             enriched_orders, 
             accounts_df,
             target_month
         )
         
-        return rag_results
+        return pipeline_output
     
-    def get_risk_summary(self, rag_results: DataFrame) -> dict:
+    def get_result_summary(self, result_table: DataFrame) -> dict:
         """
-        Generate a summary of risk indicators from RAG results.
+        Generate a summary of records in the result table.
         
-        BUSINESS_RULE: RISK_SUMMARY_GENERATION
-        Provides aggregate counts of:
-        - Accounts by RAG status (RED, AMBER, GREEN)
-        - Accounts exceeding order limits
-        - Total accounts analyzed
+        BUSINESS_RULE: RESULT_SUMMARY_GENERATION
+        Provides aggregate metrics:
+        - Total valid records
+        - Total monthly amount
+        - Total order count
         
         Args:
-            rag_results: DataFrame with RAG analysis results
+            result_table: DataFrame containing valid records
             
         Returns:
-            Dictionary containing risk summary metrics
+            Dictionary containing result summary metrics
         """
-        rag_counts = rag_results.groupBy("rag_status").count().collect()
-        rag_summary = {row["rag_status"]: row["count"] for row in rag_counts}
+        total_records = result_table.count()
         
-        limit_exceeded = rag_results.filter(
-            F.col("limit_exceeded") == "YES"
-        ).count()
+        if total_records == 0:
+            return {
+                "total_records": 0,
+                "total_amount": 0.0,
+                "total_orders": 0
+            }
         
-        total_accounts = rag_results.count()
+        agg_result = result_table.agg(
+            F.sum("monthly_total").alias("total_amount"),
+            F.sum("order_count").alias("total_orders")
+        ).collect()[0]
         
         return {
-            "total_accounts": total_accounts,
-            "red_count": rag_summary.get("RED", 0),
-            "amber_count": rag_summary.get("AMBER", 0),
-            "green_count": rag_summary.get("GREEN", 0),
-            "limit_exceeded_count": limit_exceeded
+            "total_records": total_records,
+            "total_amount": agg_result["total_amount"] or 0.0,
+            "total_orders": agg_result["total_orders"] or 0
+        }
+    
+    def get_holding_summary(self, holding_table: DataFrame) -> dict:
+        """
+        Generate a summary of records in the holding table.
+        
+        BUSINESS_RULE: HOLDING_SUMMARY_GENERATION
+        Provides aggregate counts of:
+        - Total records held
+        - Records by hold reason
+        
+        Args:
+            holding_table: DataFrame containing held records
+            
+        Returns:
+            Dictionary containing holding summary metrics
+        """
+        total_held = holding_table.count()
+        
+        if total_held == 0:
+            return {
+                "total_held": 0,
+                "by_reason": {}
+            }
+        
+        reason_counts = holding_table.groupBy("hold_reason").count().collect()
+        reason_summary = {row["hold_reason"]: row["count"] for row in reason_counts}
+        
+        return {
+            "total_held": total_held,
+            "by_reason": reason_summary
         }
 
 
 if __name__ == "__main__":
     pipeline = CustomerOrdersPipeline()
     
-    results = pipeline.run_rag_analysis(
+    output = pipeline.run_pipeline(
         accounts_path="data/sample/accounts.csv",
         orders_path="data/sample/orders.csv",
         transactions_path="data/sample/transactions.csv"
     )
     
-    results.show()
+    print("=== Result Table (Valid Records) ===")
+    output.result_table.show()
     
-    summary = pipeline.get_risk_summary(results)
-    print(f"Risk Summary: {summary}")
+    print("=== Holding Table (Invalid Records) ===")
+    output.holding_table.show()
+    
+    result_summary = pipeline.get_result_summary(output.result_table)
+    print(f"Result Summary: {result_summary}")
+    
+    holding_summary = pipeline.get_holding_summary(output.holding_table)
+    print(f"Holding Summary: {holding_summary}")
